@@ -18,6 +18,7 @@ certs/*.pem
 oci-config/
 Wallet_gmdcai-3
 certs/
+config/
 # OS
 .DS_Store
 .vscode/
