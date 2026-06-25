@@ -15,7 +15,9 @@ certs/*.der
 certs/*.p7b
 certs/*.pem
 !certs/README.md
-
+oci-config/
+Wallet_gmdcai-3
+certs/
 # OS
 .DS_Store
 .vscode/
