@@ -1,0 +1,22 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+app.py.bak
+*.log
+test_results.json
+uploads/batch_test_output.log
+
+# Certs / secrets — keep in repo only if they are public keys
+certs/*.der
+certs/*.p7b
+certs/*.pem
+!certs/README.md
+
+# OS
+.DS_Store
+.vscode/
+.idea/

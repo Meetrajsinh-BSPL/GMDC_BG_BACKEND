@@ -1,0 +1,251 @@
+Project Overview
+
+Purpose: Extract structured Bank Guarantee (BG) fields from uploaded PDF documents, validate/extract BG metadata, and optionally query ICICI Bank eBG API for matching records.
+Business problem solved: Automates BG ingestion and validation for procurement/finance: reduces manual extraction of BG number, amounts, dates, issuing bank, beneficiary (e.g., GMDC), and validates against bank records.
+Major features:
+PDF text extraction cascade (pdfplumber, PyMuPDF, pypdf, OCR) — pdf_extract.py.
+Vision-based multimodal extraction via OCI Generative AI (cohere.command-a-vision) — vision_extractor.py.
+Text-based LLM extraction via OCI Cohere model — cohere_client.py.
+Regex heuristics and normalization for BG-specific fields — heuristics.py, normalizers.py.
+ICICI eBG API client with AES/RSA encryption helpers — icici_client.py, crypto_utils.py.
+Flask REST API exposing extraction, validation and ICICI query endpoints — app.py.
+Architecture Analysis
+
+Overall pattern: Small monolith Flask API with layered responsibilities:
+Presentation layer: app.py (HTTP endpoints, request validation, CORS, Swagger).
+Extraction layer: vision_extractor.py, cohere_client.py, pdf_extract.py, field_builder.py.
+Heuristics/normalization layer: heuristics.py, normalizers.py, validation.py.
+Integration layer: icici_client.py, crypto_utils.py.
+Config/secrets: config.py.
+Runtime components:
+Flask app (exposes endpoints).
+OCI GenerativeAI client for vision/text.
+Optional OCR via Tesseract/Pillow for fallback.
+Outbound HTTPS to ICICI with encrypted payloads.
+Design patterns used:
+Façade for external API (thin client) — icici_client.query.
+Strategy/fallback pipeline for extraction: vision → LLM text → heuristics → OCR.
+Utility modules for normalization (pure functions).
+Small functional decomposition; not heavily object-oriented.
+Module / Folder Structure (top-level)
+
+Tree (top-level files & folders):
+.dockerignore
+.env, .env.example
+Dockerfile
+docker-compose.yml
+entrypoint.sh
+requirements.txt
+app.py
+config.py
+crypto_utils.py
+field_builder.py
+heuristics.py
+icici_client.py
+cohere_client.py
+vision_extractor.py
+pdf_extract.py
+normalizers.py
+validation.py
+certs/ (ICICI certs & PEMs)
+uploads/ (inspection/test scripts)
+pycache/
+(multiple PDF sample files)
+Top-level folder purposes
+Root: application code and deployment artifacts.
+certs: public certs required for ICICI encryption.
+uploads: developer utilities and test/inspection scripts for PDFs.
+Organization: feature-oriented with clear layers (extraction, normalization, integration); not a formal package layout (modules in root).
+Data Flow (high level)
+
+Client uploads PDF to /extract-bg-fields or /validate-upload (app.py).
+app reads bytes → extract_text_from_pdf ([pdf_extract.py]) to get full_text + last_pages_text (cascade).
+build_merged_fields ([field_builder.py]) attempts:
+Call extract_bg_fields_vision ([vision_extractor.py]) — image render + OCI vision chat → JSON.
+If vision fails, fall back to cohere_client.extract_bg_fields using raw text.
+Heuristics/regex augment from [heuristics.py], normalizers from [normalizers.py].
+For validation endpoints, icici_client.query is called with encrypted session key and AES-encrypted payload ([crypto_utils.py] used for AES + RSA).
+ICICI returns encrypted fields; icici_client decrypts JSON fields to plaintext and returns to app.
+validation.py performs field-level matching (amount/date/id/name) between extracted fields and ICICI API response.
+Important design choices & implications
+
+LLM-first vision approach: favors accuracy for structured fields but depends on OCI config & quota.
+Multi-stage fallback improves resilience (vision → text LLM → heuristics → OCR).
+Cryptography implemented per ICICI spec (PKCS#1v1.5) — sensitive to cert correctness.
+Dependencies / Tech Stack
+
+Python 3.x (requirements target modern 3.x, Flask 3.0)
+Frameworks/Libraries: Flask, flasgger (Swagger), flask-cors, gunicorn.
+PDF/vision: PyMuPDF (fitz), pdfplumber, pypdf, Pillow, pytesseract (optional).
+OCI SDK: oci (Generative AI usage).
+Crypto/HTTP: cryptography, requests.
+Packaging: requirements.txt (pip). No pyproject/poetry present.
+Containerization: Dockerfile, docker-compose.yml.
+No relational DB present — no ORM/migrations.
+Entry points & startup
+
+Main app entry: app.py creates app = create_app() at module bottom — WSGI callable usable by gunicorn app:app.
+Typical container start: entrypoint.sh / gunicorn in Dockerfile (read for exact command).
+Config loaded via environment variables in config.py with helper validators (require_oci, require_icici) that raise at call-time.
+Configuration & secrets
+
+config.py reads all runtime config from env vars:
+OCI: OCI_CONFIG_FILE, OCI_COMPARTMENT_ID, OCI_MODEL_ID, OCI_VISION_MODEL_ID, endpoints.
+ICICI: ICICI_API_KEY, ICICI_BASE_URL, ICICI_ENDPOINT, ICICI_CERT_PEM or ICICI_CERT_PEM_PATH, ICICI_CORP_ID.
+API_KEY optional header gate (X-API-Key).
+MAX_CONTENT_LENGTH, CORS_ALLOWED_ORIGINS.
+Certificates stored in certs but config supports inline PEM env var.
+Database technologies
+
+None. App operates statelessly over HTTP and external ICICI API.
+External integrations
+
+Oracle Cloud Infrastructure Generative AI (oci.generative_ai_inference) for both vision and text models.
+ICICI Bank eBG API using AES session key + RSA-encrypted session key per ICICI spec.
+Optional local OCR via Tesseract.
+API surface (endpoints)
+
+app.py endpoints:
+GET /health — health.
+POST /extract-bg-fields — upload PDF → extraction (vision preferred).
+POST /query-icici — query ICICI by corpId, fromDate, toDate, attachmentRequired, referenceNumber optional.
+POST /validate-upload — end-to-end: upload PDF, extract, query ICICI by extracted BG number, return validation results.
+Optional debug: /test-encryption (enabled by ENABLE_DEBUG_ENDPOINTS).
+Request/response shapes documented in Swagger config in app.py.
+Validation, middleware, error handling
+
+API key enforcement via decorator _require_api_key in app.py.
+File validation for PDF uploads in _validate_pdf_upload.
+Error handlers: 413 for file-too-large.
+Exceptions in extraction/clients are caught and returned with error messages; ICICI failures produce structured JSON (status codes preserved).
+Logging with logging module, exceptions are logged with stack trace in critical paths.
+Folder-by-folder breakdown (major modules)
+
+Root:
+Purpose: core app modules and deployment artifacts.
+Key files: app.py, config.py, requirements.txt, Docker artifacts.
+Responsibility: Wire-up Flask + endpoints + Swagger.
+Extraction:
+vision_extractor.py: Vision LLM client; renders PDF pages to images and calls OCI generative chat API expecting strict JSON.
+cohere_client.py: Text LLM path (OCI Cohere model) operating on extracted text.
+pdf_extract.py: Multi-library PDF text extraction cascade and OCR fallback.
+field_builder.py: Orchestrates vision-first flow, falls back to text-based approaches, merges heuristics.
+Heuristics/normalization:
+heuristics.py: Regex-based extraction for common patterns (dates, BG number, IFSC).
+normalizers.py: Text fixes, OCR confusion handlers, date/amount normalization.
+validation.py: Matching rules between extracted fields and ICICI API data.
+Integration / crypto:
+icici_client.py: Builds encrypted payload, posts to ICICI, decrypts responses.
+crypto_utils.py: AES/CBC encrypt/decrypt helpers and RSA session-key encryption.
+Utilities / examples:
+certs: cert files used in development.
+uploads: test & inspection scripts for offline analysis.
+Database Analysis
+
+No DB present — no models or migrations. All state is ephemeral.
+API details: request/response/validation
+
+extract-bg-fields: multipart/form-data file upload; returns fields in JSON or extraction error.
+query-icici: expects JSON body with required keys; returns decrypted object which is processed for validation.
+Validation uses validation.py scoring functions (amount_matches, date_matches, id_matches, bank_name_matches, subject_matches).
+Frontend
+
+None in repo.
+Code Quality Review
+
+Strengths:
+Clear separation of concerns (extraction vs normalization vs integration).
+Robust multi-stage fallback strategy (vision → text LLM → heuristics → OCR).
+Good logging and defensive error handling.
+Swagger documentation embedded for endpoints.
+Weaknesses / code smells:
+Flat module layout (many modules at repo root) — can be reorganized into a package (e.g., gmdc_bg_api/).
+No tests / no automated test harness present.
+Hard to mock OCI/ICICI clients for unit testing in current layout.
+Some duplicated expected keys lists across vision_extractor.py and cohere_client.py.
+Technical debt:
+Lack of README, contributing docs, and tests.
+Environment setup and secrets handling rely on env files; recommend documenting .env.example fields.
+Security concerns:
+Crypto handled appropriately but ensure ICICI_CERT_PEM and ICICI_API_KEY are stored securely (not in repo).
+DEBUG_ENDPOINTS can expose sensitive round-trip encryption testing — must be disabled in production.
+Swagger UI exposed at /apidocs/ could be a data leak if behind auth.
+Ensure TLS and network egress is controlled in deployment (ICICI endpoints).
+Performance concerns:
+Rendering pages and API calls to OCI are potentially slow (vision model timeouts configured; heavy CPU for PyMuPDF/Pillow/OCR). Consider async workers or background jobs for heavy loads.
+MAX_CONTENT_LENGTH mitigates huge uploads, but consider streaming large PDFs.
+Development workflow
+
+How to run locally (dev):
+Create virtualenv, install deps:
+Set required env vars (see config.py for names). For extraction-only testing, ICICI cert/env can be omitted.
+Run with Flask (dev):
+Or use gunicorn (production-like):
+Build/process:
+Dockerfile and docker-compose present; build image and run compose for local containerised testing.
+Testing strategy:
+None present. Recommended:
+Add unit tests for normalizers.py, heuristics.py, and validation.py.
+Add integration tests mocking OCI and ICICI (use responses or requests-mock) for icici_client.py.
+Add small sample PDFs (already present) and fixtures for extraction pipeline tests.
+Deployment:
+Docker-based deployments implied. Ensure env vars and certs are injected securely (secrets manager or mounted certs).
+Most Important files — Top 20 to read first
+
+app.py — entry points, endpoint logic, validation and wiring.
+field_builder.py — orchestrates extraction flows and merges results.
+vision_extractor.py — vision-first logic and OCI vision usage.
+cohere_client.py — text-based LLM extraction and validation scoring.
+pdf_extract.py — extraction cascade and OCR interfaces.
+heuristics.py — regex extraction (BG-specific rules).
+normalizers.py — normalization primitives used across modules.
+validation.py — matching rules for ICICI validation.
+icici_client.py — ICICI API integration and decrypted response handling.
+crypto_utils.py — AES/RSA logic (security-critical).
+config.py — env-driven configuration; defaults and validation helpers.
+requirements.txt — dependency list & runtime choices.
+Dockerfile — container build and run commands.
+docker-compose.yml — compose flow for local stacks.
+entrypoint.sh — container entrypoint (startup behavior).
+certs/ (directory) — check certs used by ICICI; point to auth/compat.
+uploads/ (scripts) — developer inspection/testing harnesses.
+[vision_extractor.py] (again important) — edge cases and JSON parsing rules.
+[cohere_client.py] (again) — preamble prompts and parsing semantics.
+Any sample PDF in repo root — for manual extraction testing.
+Change Impact Guide
+
+Safest to modify:
+normalizers.py (pure functions) — unit-testable, low risk if tests added.
+heuristics.py — changes expected to improve extraction; ensure tests against sample PDFs.
+Logging levels and message formats in app.py.
+High-risk files:
+crypto_utils.py and icici_client.py — any change affects encryption/integrity of ICICI requests and may break production integration.
+vision_extractor.py, cohere_client.py — changes alter LLM behavior; can degrade extraction accuracy or break JSON parsing.
+app.py endpoint flows — affects inputs/outputs and error handling; must preserve contract.
+Dependencies to check before change:
+config.py env var names and defaults — changing names will affect deployments.
+Keys/expected fields repeated across modules (EXPECTED_KEYS) — update in both vision & cohere clients if schema changes.
+Cryptography library versions — ensure compatibility with cryptography API.
+Potential side effects:
+Changing normalization rules may alter BG number shapes causing ICICI queries to fail.
+Updating LLM prompt or model ID can change output JSON format; add robust parsing and validation.
+Tweaking PDF rendering zoom or page limits affects image sizes and LLM input length/cost.
+Missing information / assumptions
+
+No README.md or CONTRIBUTING — assume devs have env var knowledge; add docs.
+No tests — assume manual/CI testing required.
+Assume production runs in container behind TLS & ingress; app uses Swagger UI unprotected unless API_KEY is set.
+Architecture diagram (text / mermaid)
+
+
+Key workflows
+
+Extract-only: Client -> /extract-bg-fields -> PDF text extraction -> vision LLM (images) or text LLM -> post-processing -> return fields.
+Validate-upload: upload -> extract -> ICICI query (encrypted) -> decrypt -> match using validation.py -> return results.
+Critical modules
+
+field_builder.py, vision_extractor.py, cohere_client.py, pdf_extract.py, icici_client.py, crypto_utils.py, app.py.
+Overall maintainability rating
+
+7/10
+Rationale: Code is modular and well-structured for a small service; good separation of concerns and logging. Downgrades for lack of tests, lack of packaging (flat module root), missing documentation, and duplicated schema constants.

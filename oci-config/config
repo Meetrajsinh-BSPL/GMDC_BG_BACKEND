@@ -1,0 +1,6 @@
+[DEFAULT]
+tenancy=ocid1.tenancy.oc1..aaaaaaaaka6fr63s2nsz4nhpnbrtnkfzupglbgt774rqmv3yedzfy37nawiq
+user=ocid1.user.oc1..aaaaaaaahnfa57bac3h37xy4cua7hvju4ida6zttfzfw3rfiwxhteitqslha
+fingerprint=49:56:b5:77:09:f3:14:86:11:3b:4b:d3:22:bf:61:a4
+key_file=F:/GMDC/gmdc_bg_api/oci-config/oci_genai_key.pem
+region=ap-hyderabad-1

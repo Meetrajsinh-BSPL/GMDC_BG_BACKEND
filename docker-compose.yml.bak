@@ -1,0 +1,39 @@
+services:
+  bg-processor:
+    build: .
+    ports:
+      - "5000:5000"
+    env_file:
+      - .env
+    volumes:
+      - ./certs:/app/certs:ro
+      - /aidata/gmdctenderbot/oci-config/config:/root/.oci/config:ro
+      - /aidata/gmdctenderbot/oci-config/oci_genai_key.pem:/root/.oci/oci_genai_key.pem:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+services:
+  bg-processor:
+    build: .
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./certs:/app/certs:ro
+      - ./uploads:/tmp/uploads
+      - /aidata/gmdctenderbot/oci-config/config:/root/.oci/config:ro
+      - /aidata/gmdctenderbot/oci-config/oci_genai_key.pem:/root/.oci/oci_genai_key.pem:ro
+    environment:
+      - FLASK_ENV=production
+      - PYTHONUNBUFFERED=1
+      - OCI_CONFIG_FILE=/root/.oci/config
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s

@@ -1,0 +1,181 @@
+from __future__ import annotations
+"""Merge heuristic + Cohere extractions and apply post-processing safety nets."""
+import logging
+import re
+
+from cohere_client import extract_bg_fields
+from heuristics import FLEX_DATE, extract_cover_table_cell, extract_fields
+from normalizers import (
+    dehyphenate,
+    fix_bg_number,
+    fix_common_ocr_confusions_identifier,
+    fix_ifsc_code,
+    is_valid_bg_number,
+    normalize_amount_numeric,
+    reconcile_bg_with_bank,
+    to_dd_mm_yyyy,
+)
+from pdf_extract import ocr_first_pages_highres
+
+logger = logging.getLogger(__name__)
+
+PRIORITY_LAST_PAGE_FIELDS = (
+    "date_of_issue", "expiry_date", "claim_expiry_date",
+    "bank_guarantee_number", "bg_issuing_bank", "bank_address",
+    "amount_of_bg", "applicant_name", "rfp_number",
+    "rfp_purchase_order_subject", "subject",
+)
+
+
+def _ocr_retry_for_bg_number(pdf_bytes: bytes) -> str:
+    text = ocr_first_pages_highres(pdf_bytes, n_pages=2)
+    if not text:
+        return ""
+    retry = extract_fields(text)
+    bg = retry.get("bank_guarantee_number", "")
+    if not bg:
+        return ""
+    bg = fix_bg_number(fix_common_ocr_confusions_identifier(bg))
+    if is_valid_bg_number(bg):
+        logger.info("BG# retry succeeded: %s", bg)
+        return bg
+    return ""
+
+
+def _apply_cohere_fallbacks(parsed: dict, extracted_text: str) -> None:
+    """Regex fallbacks for fields Cohere missed."""
+    if not parsed.get("currency") and re.search(r"\b(Rs\.?|INR)\b", extracted_text, re.IGNORECASE):
+        parsed["currency"] = "INR"
+
+    if not parsed.get("rfp_number") or parsed["rfp_number"].strip().upper() in {"BANK", "BG", "NA"}:
+        m = re.search(r"RFP\s*No\.?\s*([A-Za-z0-9/_-]+)", extracted_text, re.IGNORECASE)
+        if m:
+            parsed["rfp_number"] = m.group(1).strip()
+
+    if not parsed.get("subject"):
+        m = re.search(r"EARNEST MONEY DEPOSIT.*BANK GUARANTEE", extracted_text, re.IGNORECASE)
+        if m:
+            parsed["subject"] = m.group(0).strip()
+
+    if not parsed.get("bank_guarantee_number"):
+        m = re.search(
+            r"(?:BANK GUARANTEE NO[:\s]*|BG No\.\s*)([0-9/]+)", extracted_text, re.IGNORECASE
+        )
+        if m:
+            parsed["bank_guarantee_number"] = m.group(1).strip()
+
+    date_pairs = [
+        ("date_of_issue", r"(?:ISSUANCE|Issue)\s*DATE?[:\s]*" + FLEX_DATE),
+        ("date_of_issue", r"DT[:\s]+([0-9]{1,2}[.\-/][0-9]{1,2}[.\-/][0-9]{4})"),
+        ("expiry_date", r"Date\s*of\s*Expiry\s*[:\-]\s*" + FLEX_DATE),
+        ("expiry_date", r"valid\s*up\s*to\s*" + FLEX_DATE),
+        ("expiry_date", r"valid\s*(?:till|until|upto)[:\s]*" + FLEX_DATE),
+        ("claim_expiry_date", r"Claim\s*Expiry\s*Date\s*[:\-]\s*" + FLEX_DATE),
+        ("claim_expiry_date",
+         r"on\s*or\s*before\s*(?:the\s*)?(?:\(date\)\s*)?" + FLEX_DATE),
+    ]
+    for key, pat in date_pairs:
+        if parsed.get(key):
+            continue
+        m = re.search(pat, extracted_text, re.IGNORECASE)
+        if m:
+            parsed[key] = m.group(1).strip()
+
+    # Single-date cover letters: if only claim_expiry_date is set and no explicit
+    # claim-end phrasing exists, treat it as the guarantee expiry instead.
+    if not parsed.get("expiry_date") and parsed.get("claim_expiry_date"):
+        if not re.search(
+            r"(claim\s*expiry|claim\s*end|on\s*or\s*before|claimEndDate|:7029:)",
+            extracted_text, re.IGNORECASE,
+        ):
+            parsed["expiry_date"] = parsed["claim_expiry_date"]
+            parsed["claim_expiry_date"] = ""
+
+
+def build_merged_fields(full_text, last_pages_text, pdf_bytes=None):
+    """Run heuristic + Cohere extraction, merge, and harden the result."""
+    full_text = dehyphenate(full_text)
+    last_pages_text = dehyphenate(last_pages_text)
+
+    heur = extract_fields(full_text)
+    if last_pages_text:
+        heur_last = extract_fields(last_pages_text)
+        for k in PRIORITY_LAST_PAGE_FIELDS:
+            if heur_last.get(k):
+                heur[k] = heur_last[k]
+
+    cohere_result = extract_bg_fields(full_text, last_pages_text)
+    merged = dict(cohere_result.get("fields", {})) if cohere_result.get("success") else {}
+
+    if cohere_result.get("success"):
+        _apply_cohere_fallbacks(merged, full_text)
+
+    # Fill gaps from heuristic
+    for k, v in heur.items():
+        if not (merged.get(k) or "").strip():
+            merged[k] = v
+
+    # Applicant consolidation (legacy schema had applicant_name + applicant_address)
+    cover_applicant = extract_cover_table_cell(full_text, "Name and Address of the Applicant")
+    applicant_name = (merged.pop("applicant_name", "") or "").strip()
+    applicant_address = (merged.pop("applicant_address", "") or "").strip()
+    if cover_applicant:
+        merged["applicant"] = cover_applicant
+    elif applicant_name or applicant_address:
+        merged["applicant"] = f"{applicant_name} {applicant_address}".strip()
+
+    # in_favour_of consolidation
+    in_favour_of_val = (merged.get("in_favour_of") or "").strip()
+    in_favour_address_val = (merged.pop("in_favour_address", "") or "").strip()
+    if in_favour_of_val or in_favour_address_val:
+        merged["in_favour_of"] = f"{in_favour_of_val} {in_favour_address_val}".strip()
+
+    if merged.get("amount_of_bg"):
+        merged["amount_of_bg"] = normalize_amount_numeric(merged["amount_of_bg"])
+
+    if merged.get("ifs_code"):
+        merged["ifs_code"] = fix_ifsc_code(merged["ifs_code"])
+
+    if merged.get("bank_guarantee_number"):
+        fixed = fix_bg_number(fix_common_ocr_confusions_identifier(merged["bank_guarantee_number"]))
+        if is_valid_bg_number(fixed):
+            merged["bank_guarantee_number"] = fixed
+        else:
+            heur_bg = fix_bg_number(
+                fix_common_ocr_confusions_identifier(heur.get("bank_guarantee_number", ""))
+            )
+            merged["bank_guarantee_number"] = heur_bg if is_valid_bg_number(heur_bg) else ""
+
+    # Bank-aware O↔0 / I↔1 reconciliation
+    if merged.get("bank_guarantee_number") and merged.get("bg_issuing_bank"):
+        before = merged["bank_guarantee_number"]
+        after = reconcile_bg_with_bank(before, merged["bg_issuing_bank"])
+        if after != before:
+            logger.info("BG# reconciled via bank pattern: %s -> %s", before, after)
+            merged["bank_guarantee_number"] = after
+
+    if merged.get("rfp_number"):
+        merged["rfp_number"] = fix_common_ocr_confusions_identifier(merged["rfp_number"])
+
+    if merged.get("bg_issuing_bank"):
+        merged["bg_issuing_bank"] = (
+            merged["bg_issuing_bank"]
+            .replace("1CICI", "ICICI")
+            .replace("HDF0", "HDFC")
+            .replace("SBl", "SBI")
+        )
+
+    for k in ("date_of_issue", "expiry_date", "claim_expiry_date"):
+        if merged.get(k):
+            merged[k] = to_dd_mm_yyyy(merged[k])
+
+    if not (merged.get("in_favour_of") or "").strip():
+        if re.search(r"GMDC|Gujarat\s*Mineral", full_text, re.IGNORECASE):
+            merged["in_favour_of"] = "Gujarat Mineral Development Corporation Limited (GMDC)"
+
+    if not (merged.get("bank_guarantee_number") or "").strip() and pdf_bytes:
+        retry_bg = _ocr_retry_for_bg_number(pdf_bytes)
+        if retry_bg:
+            merged["bank_guarantee_number"] = retry_bg
+
+    return merged

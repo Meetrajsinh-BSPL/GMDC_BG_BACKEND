@@ -1,0 +1,23 @@
+# VCS
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+.venv
+venv
+.env
+
+# Local artefacts
+*.pdf
+uploads/
+app.py.bak
+*.log
+test_results.json
+
+# Editor / OS
+.vscode
+.idea
+.DS_Store

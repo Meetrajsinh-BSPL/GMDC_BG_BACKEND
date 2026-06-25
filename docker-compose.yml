@@ -1,0 +1,22 @@
+services:
+  bg-processor:
+    build: .
+    container_name: gmdc_bg_api
+    ports:
+      - "5000:5000"
+    env_file:
+      - .env
+    environment:
+      - OCI_CONFIG_FILE=/home/appuser/.oci/config
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./certs:/app/certs:ro
+      - /aidata/gmdctenderbot/oci-config/config:/tmp/oci-config.src:ro
+      - /aidata/gmdctenderbot/oci-config/oci_genai_key.pem:/home/appuser/.oci/oci_genai_key.pem:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
